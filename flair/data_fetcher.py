@@ -104,7 +104,7 @@ class NLPTask(Enum):
 class NLPTaskDataFetcher:
     @staticmethod
     def load_corpora(
-        tasks: List[Union[NLPTask, str]], base_path: Path = None
+            tasks: List[Union[NLPTask, str]], base_path: Path = None
     ) -> MultiCorpus:
         return MultiCorpus(
             [NLPTaskDataFetcher.load_corpus(task, base_path) for task in tasks]
@@ -112,7 +112,7 @@ class NLPTaskDataFetcher:
 
     @staticmethod
     def load_corpus(
-        task: Union[NLPTask, str], base_path: [str, Path] = None
+            task: Union[NLPTask, str], base_path: [str, Path] = None
     ) -> TaggedCorpus:
         """
         Helper function to fetch a TaggedCorpus for a specific NLPTask. For this to work you need to first download
@@ -150,9 +150,9 @@ class NLPTaskDataFetcher:
 
         # many NER tasks follow the CoNLL 03 format with four colulms: text, pos, np and ner tag
         if (
-            task == NLPTask.CONLL_03.value
-            or task == NLPTask.ONTONER.value
-            or task == NLPTask.FASHION.value
+                task == NLPTask.CONLL_03.value
+                or task == NLPTask.ONTONER.value
+                or task == NLPTask.FASHION.value
         ):
             columns = {0: "text", 1: "pos", 2: "np", 3: "ner"}
 
@@ -236,12 +236,13 @@ class NLPTaskDataFetcher:
 
     @staticmethod
     def load_column_corpus(
-        data_folder: Union[str, Path],
-        column_format: Dict[int, str],
-        train_file=None,
-        test_file=None,
-        dev_file=None,
-        tag_to_biloes=None,
+            data_folder: Union[str, Path],
+            column_format: Dict[int, str],
+            train_file=None,
+            test_file=None,
+            dev_file=None,
+            tag_to_biloes=None,
+            max_sequence_length=None
     ) -> TaggedCorpus:
         """
         Helper function to get a TaggedCorpus from CoNLL column-formatted task data such as CoNLL03 or CoNLL2000.
@@ -252,6 +253,7 @@ class NLPTaskDataFetcher:
         :param test_file: the name of the test file
         :param dev_file: the name of the dev file, if None, dev data is sampled from train
         :param tag_to_biloes: whether to convert to BILOES tagging scheme
+        :param max_sequence_length:
         :return: a TaggedCorpus with annotated train, dev and test data
         """
 
@@ -323,6 +325,12 @@ class NLPTaskDataFetcher:
             ]
             sentences_train = [x for x in sentences_train if x not in sentences_dev]
 
+        if max_sequence_length is not None:
+            print("Dropping sequences longer than %d" % max_sequence_length)
+            sentences_train = list(filter(lambda s: len(" ".join([t.text for t in s.tokens])) <= max_sequence_length, sentences_train))
+            sentences_test = list(filter(lambda s: len(" ".join([t.text for t in s.tokens])) <= max_sequence_length, sentences_test))
+            sentences_dev = list(filter(lambda s: len(" ".join([t.text for t in s.tokens])) <= max_sequence_length, sentences_dev))
+
         if tag_to_biloes is not None:
             # convert tag scheme to iobes
             for sentence in sentences_train + sentences_test + sentences_dev:
@@ -336,7 +344,7 @@ class NLPTaskDataFetcher:
 
     @staticmethod
     def load_ud_corpus(
-        data_folder: Union[str, Path], train_file=None, test_file=None, dev_file=None
+            data_folder: Union[str, Path], train_file=None, test_file=None, dev_file=None
     ) -> TaggedCorpus:
         """
         Helper function to get a TaggedCorpus from CoNLL-U column-formatted task data such as the UD corpora
@@ -377,12 +385,12 @@ class NLPTaskDataFetcher:
 
     @staticmethod
     def load_classification_corpus(
-        data_folder: Union[str, Path],
-        train_file=None,
-        test_file=None,
-        dev_file=None,
-        use_tokenizer: bool = True,
-        max_tokens_per_doc=-1,
+            data_folder: Union[str, Path],
+            train_file=None,
+            test_file=None,
+            dev_file=None,
+            use_tokenizer: bool = True,
+            max_tokens_per_doc=-1,
     ) -> TaggedCorpus:
         """
         Helper function to get a TaggedCorpus from text classification-formatted task data
@@ -458,7 +466,7 @@ class NLPTaskDataFetcher:
 
     @staticmethod
     def read_text_classification_file(
-        path_to_file: Union[str, Path], max_tokens_per_doc=-1, use_tokenizer=True
+            path_to_file: Union[str, Path], max_tokens_per_doc=-1, use_tokenizer=True
     ) -> List[Sentence]:
         """
         Reads a data file for text classification. The file should contain one document/text per line.
@@ -503,9 +511,9 @@ class NLPTaskDataFetcher:
 
     @staticmethod
     def read_column_data(
-        path_to_column_file: Path,
-        column_name_map: Dict[int, str],
-        infer_whitespace_after: bool = True,
+            path_to_column_file: Path,
+            column_name_map: Dict[int, str],
+            infer_whitespace_after: bool = True,
     ):
         """
         Reads a file in column format and produces a list of Sentence with tokenlevel annotation as specified in the
@@ -642,21 +650,21 @@ class NLPTaskDataFetcher:
                 import gzip, shutil
 
                 with gzip.open(
-                    Path(flair.cache_root) / "datasets" / task.value / "train.txt.gz",
-                    "rb",
+                        Path(flair.cache_root) / "datasets" / task.value / "train.txt.gz",
+                        "rb",
                 ) as f_in:
                     with open(
-                        Path(flair.cache_root) / "datasets" / task.value / "train.txt",
-                        "wb",
+                            Path(flair.cache_root) / "datasets" / task.value / "train.txt",
+                            "wb",
                     ) as f_out:
                         shutil.copyfileobj(f_in, f_out)
                 with gzip.open(
-                    Path(flair.cache_root) / "datasets" / task.value / "test.txt.gz",
-                    "rb",
+                        Path(flair.cache_root) / "datasets" / task.value / "test.txt.gz",
+                        "rb",
                 ) as f_in:
                     with open(
-                        Path(flair.cache_root) / "datasets" / task.value / "test.txt",
-                        "wb",
+                            Path(flair.cache_root) / "datasets" / task.value / "test.txt",
+                            "wb",
                     ) as f_out:
                         shutil.copyfileobj(f_in, f_out)
 
@@ -671,8 +679,8 @@ class NLPTaskDataFetcher:
                 import tarfile, shutil
 
                 with tarfile.open(
-                    Path(flair.cache_root) / "datasets" / task.value / "eiec_v1.0.tgz",
-                    "r:gz",
+                        Path(flair.cache_root) / "datasets" / task.value / "eiec_v1.0.tgz",
+                        "r:gz",
                 ) as f_in:
                     corpus_files = (
                         "eiec_v1.0/named_ent_eu.train",
@@ -693,11 +701,11 @@ class NLPTaskDataFetcher:
                 import tarfile
 
                 with tarfile.open(
-                    Path(flair.cache_root)
-                    / "datasets"
-                    / task.value
-                    / "aclImdb_v1.tar.gz",
-                    "r:gz",
+                        Path(flair.cache_root)
+                        / "datasets"
+                        / task.value
+                        / "aclImdb_v1.tar.gz",
+                        "r:gz",
                 ) as f_in:
                     datasets = ["train", "test"]
                     labels = ["pos", "neg"]
@@ -716,7 +724,7 @@ class NLPTaskDataFetcher:
                                 current_path = data_path / "aclImdb" / dataset / label
                                 for file_name in current_path.iterdir():
                                     if file_name.is_file() and file_name.name.endswith(
-                                        ".txt"
+                                            ".txt"
                                     ):
                                         f_p.write(
                                             f"__label__{label} "
@@ -743,15 +751,15 @@ class NLPTaskDataFetcher:
 
             if not data_file.is_file():
                 for original_filename, new_filename in zip(
-                    original_filenames, new_filenames
+                        original_filenames, new_filenames
                 ):
                     with open(
-                        data_path / "original" / original_filename,
-                        "rt",
-                        encoding="latin1",
+                            data_path / "original" / original_filename,
+                            "rt",
+                            encoding="latin1",
                     ) as open_fp:
                         with open(
-                            data_path / new_filename, "wt", encoding="utf-8"
+                                data_path / new_filename, "wt", encoding="utf-8"
                         ) as write_fp:
                             for line in open_fp:
                                 line = line.rstrip()
@@ -805,10 +813,10 @@ class NLPTaskDataFetcher:
                 lc = "ru"
 
             data_file = (
-                Path(flair.cache_root)
-                / "datasets"
-                / task.value
-                / f"aij-wikiner-{lc}-wp3.train"
+                    Path(flair.cache_root)
+                    / "datasets"
+                    / task.value
+                    / f"aij-wikiner-{lc}-wp3.train"
             )
             if not data_file.is_file():
 
@@ -827,11 +835,11 @@ class NLPTaskDataFetcher:
                     "rb",
                 )
                 with bz_file as f, open(
-                    Path(flair.cache_root)
-                    / "datasets"
-                    / task.value
-                    / f"aij-wikiner-{lc}-wp3.train",
-                    "w",
+                        Path(flair.cache_root)
+                        / "datasets"
+                        / task.value
+                        / f"aij-wikiner-{lc}-wp3.train",
+                        "w",
                 ) as out:
                     for line in f:
                         line = line.decode("utf-8")
@@ -1319,6 +1327,6 @@ class NLPTaskDataFetcher:
                 with open(new_train_file, "wt") as f_out:
                     for train_filename in train_filenames:
                         with open(
-                            data_path / "original" / train_filename, "rt"
+                                data_path / "original" / train_filename, "rt"
                         ) as f_in:
                             f_out.write(f_in.read())
