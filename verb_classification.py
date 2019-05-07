@@ -43,7 +43,7 @@ classifier = TextClassifier(document_embeddings, label_dictionary=label_dict, mu
 trainer = ModelTrainer(classifier, corpus)
 
 # 7. start the training
-trainer.train('resources/taggers/ag_news',
+trainer.train('resources/taggers/verb_sense',
               learning_rate=0.1,
               mini_batch_size=32,
               anneal_factor=0.5,
@@ -54,13 +54,13 @@ trainer.train('resources/taggers/ag_news',
 from flair.visual.training_curves import Plotter
 
 plotter = Plotter()
-plotter.plot_training_curves('resources/taggers/ag_news/loss.tsv')
-plotter.plot_weights('resources/taggers/ag_news/weights.txt')
+plotter.plot_training_curves('resources/taggers/verb_sense/loss.tsv')
+plotter.plot_weights('resources/taggers/verb_sense/weights.txt')
 
-classifier = TextClassifier.load_from_file('resources/taggers/ag_news/final-model.pt')
+classifier = TextClassifier.load_from_file('resources/taggers/verb_sense/final-model.pt')
 
 # create example sentence
-sentence = Sentence('France is the current world cup winner.')
+sentence = Sentence('Es läuft heute sehr gut !')
 
 # predict tags and print
 classifier.predict(sentence)
