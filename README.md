@@ -25,7 +25,7 @@ document embeddings, including our proposed **[Flair embeddings](https://drive.g
 * **A Pytorch NLP framework.** Our framework builds directly on [Pytorch](https://pytorch.org/), making it easy to 
 train your own models and experiment with new approaches using Flair embeddings and classes.
 
-Now at [version 0.4.1](https://github.com/zalandoresearch/flair/releases)!
+Now at [version 0.4.2](https://github.com/zalandoresearch/flair/releases)!
 
 ## Comparison with State-of-the-Art
 
@@ -49,9 +49,13 @@ Here's how to [reproduce these numbers](/resources/docs/EXPERIMENTS.md) using Fl
 Alan Akbik, Duncan Blythe and Roland Vollgraf. 
 27th International Conference on Computational Linguistics, **COLING 2018**.*
 
-* *Pooled Contextualized Embeddings for Named Entity Recognition (to appear).
+* *[Pooled Contextualized Embeddings for Named Entity Recognition](https://www.aclweb.org/anthology/papers/N/N19/N19-1078/).
 Alan Akbik, Tanja Bergmann and Roland Vollgraf.
 2019 Annual Conference of the North American Chapter of the Association for Computational Linguistics, **NAACL 2019**.*
+
+* *[FLAIR: An Easy-to-Use Framework for State-of-the-Art NLP](https://www.aclweb.org/anthology/papers/N/N19/N19-4010/).
+Alan Akbik, Tanja Bergmann, Duncan Blythe, Kashif Rasul, Stefan Schweter and Roland Vollgraf.
+2019 Annual Conference of the North American Chapter of the Association for Computational Linguistics (Demonstrations), **NAACL 2019**.*
 
 ## Quick Start
 
@@ -151,7 +155,7 @@ If you use the pooled version of the Flair embeddings (PooledFlairEmbeddings), p
   title={Pooled Contextualized Embeddings for Named Entity Recognition},
   author={Akbik, Alan and Bergmann, Tanja and Vollgraf, Roland},
   booktitle = {{NAACL} 2019, 2019 Annual Conference of the North American Chapter of the Association for Computational Linguistics},
-  pages     = {to appear},
+  pages     = {724–728},
   year      = {2019}
 }
 ```

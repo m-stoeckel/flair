@@ -1,19 +1,19 @@
 from typing import List
 
-from flair.data_fetcher import NLPTaskDataFetcher, NLPTask
-from flair.data import TaggedCorpus
+import flair.datasets
+from flair.data import Corpus
 from flair.embeddings import (
     TokenEmbeddings,
     WordEmbeddings,
     StackedEmbeddings,
-    CharLMEmbeddings,
+    FlairEmbeddings,
     CharacterEmbeddings,
 )
 from flair.training_utils import EvaluationMetric
 from flair.visual.training_curves import Plotter
 
 # 1. get the corpus
-corpus: TaggedCorpus = NLPTaskDataFetcher.load_corpus(NLPTask.UD_ENGLISH)
+corpus: Corpus = flair.datasets.UD_ENGLISH()
 print(corpus)
 
 # 2. what tag do we want to predict?
@@ -30,9 +30,9 @@ embedding_types: List[TokenEmbeddings] = [
     # CharacterEmbeddings(),
     # comment in these lines to use contextual string embeddings
     #
-    # CharLMEmbeddings('news-forward'),
+    # FlairEmbeddings('news-forward'),
     #
-    # CharLMEmbeddings('news-backward'),
+    # FlairEmbeddings('news-backward'),
 ]
 
 embeddings: StackedEmbeddings = StackedEmbeddings(embeddings=embedding_types)
@@ -59,7 +59,7 @@ trainer.train(
     learning_rate=0.1,
     mini_batch_size=32,
     max_epochs=20,
-    test_mode=True,
+    shuffle=False,
 )
 
 plotter = Plotter()

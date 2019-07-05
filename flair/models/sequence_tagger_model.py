@@ -5,12 +5,14 @@ from pathlib import Path
 import torch.nn
 from torch.optim import Optimizer
 import torch.nn.functional as F
+from torch.utils.data.dataset import Dataset
 
 import flair.nn
 import torch
 
 import flair.embeddings
 from flair.data import Dictionary, Sentence, Token, Label
+from flair.datasets import DataLoader
 from flair.file_utils import cached_path
 
 from typing import List, Tuple, Union
@@ -18,6 +20,7 @@ from typing import List, Tuple, Union
 from flair.training_utils import clear_embeddings, Metric, Result
 
 from tqdm import tqdm
+from tabulate import tabulate
 
 log = logging.getLogger("flair")
 
@@ -207,31 +210,35 @@ class SequenceTagger(flair.nn.Model):
 
     def evaluate(
         self,
-        sentences: List[Sentence],
+        sentences: Dataset,
         eval_mini_batch_size: int = 32,
         embeddings_in_memory: bool = True,
         out_path: Path = None,
+        num_workers: int = 8,
     ) -> (Result, float):
 
         with torch.no_grad():
             eval_loss = 0
 
             batch_no: int = 0
-            batches = [
-                sentences[x : x + eval_mini_batch_size]
-                for x in range(0, len(sentences), eval_mini_batch_size)
-            ]
+
+            batch_loader = DataLoader(
+                sentences,
+                batch_size=eval_mini_batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+            )
 
             metric = Metric("Evaluation")
 
             lines: List[str] = []
-            for batch in batches:
+            for batch in batch_loader:
                 batch_no += 1
 
                 with torch.no_grad():
                     features = self.forward(batch)
                     loss = self._calculate_loss(features, batch)
-                    tags = self._obtain_labels(features, batch)
+                    tags, _ = self._obtain_labels(features, batch)
 
                 eval_loss += loss
 
@@ -276,7 +283,7 @@ class SequenceTagger(flair.nn.Model):
                     batch, also_clear_word_embeddings=not embeddings_in_memory
                 )
 
-            eval_loss /= len(sentences)
+            eval_loss /= batch_no
 
             if out_path is not None:
                 with open(out_path, "w", encoding="utf-8") as outfile:
@@ -315,6 +322,7 @@ class SequenceTagger(flair.nn.Model):
         sentences: Union[List[Sentence], Sentence],
         mini_batch_size=32,
         verbose=False,
+        clear_word_embeddings=True,
     ) -> List[Sentence]:
         with torch.no_grad():
             if isinstance(sentences, Sentence):
@@ -345,14 +353,19 @@ class SequenceTagger(flair.nn.Model):
 
                 with torch.no_grad():
                     feature = self.forward(batch)
-                    tags = self._obtain_labels(feature, batch)
+                    tags, all_tags = self._obtain_labels(feature, batch)
 
-                for (sentence, sent_tags) in zip(batch, tags):
-                    for (token, tag) in zip(sentence.tokens, sent_tags):
+                for (sentence, sent_tags, sent_all_tags) in zip(batch, tags, all_tags):
+                    for (token, tag, token_all_tags) in zip(
+                        sentence.tokens, sent_tags, sent_all_tags
+                    ):
                         token.add_tag_label(self.tag_type, tag)
+                        token.add_tags_proba_dist(self.tag_type, token_all_tags)
 
                 # clearing token embeddings to save memory
-                clear_embeddings(batch, also_clear_word_embeddings=True)
+                clear_embeddings(
+                    batch, also_clear_word_embeddings=clear_word_embeddings
+                )
 
             return sentences
 
@@ -493,7 +506,7 @@ class SequenceTagger(flair.nn.Model):
 
             score = forward_score - gold_score
 
-            return score.sum()
+            return score.mean()
 
         else:
             score = 0
@@ -505,29 +518,39 @@ class SequenceTagger(flair.nn.Model):
                 score += torch.nn.functional.cross_entropy(
                     sentence_feats, sentence_tags
                 )
-
+            score /= len(features)
             return score
 
-    def _obtain_labels(self, feature, sentences) -> List[List[Label]]:
+    def _obtain_labels(
+        self, feature, sentences
+    ) -> (List[List[Label]], List[List[List[Label]]]):
+        """
+        Returns a tuple of two lists: 
+         - The first list corresponds to the most likely `Label` per token in each sentence.
+         - The second list contains a probability distribution over all `Labels` for each token 
+           in a sentence for all sentences.
+        """
 
         sentences.sort(key=lambda x: len(x), reverse=True)
 
         lengths: List[int] = [len(sentence.tokens) for sentence in sentences]
 
         tags = []
-
+        all_tags = []
         for feats, length in zip(feature, lengths):
             if self.use_crf:
-                confidences, tag_seq = self._viterbi_decode(feats[:length])
+                confidences, tag_seq, scores = self._viterbi_decode(feats[:length])
             else:
                 tag_seq = []
                 confidences = []
+                scores = []
                 for backscore in feats[:length]:
                     softmax = F.softmax(backscore, dim=0)
                     _, idx = torch.max(backscore, 0)
                     prediction = idx.item()
                     tag_seq.append(prediction)
                     confidences.append(softmax[prediction].item())
+                    scores.append(softmax.tolist())
 
             tags.append(
                 [
@@ -536,11 +559,22 @@ class SequenceTagger(flair.nn.Model):
                 ]
             )
 
-        return tags
+            all_tags.append(
+                [
+                    [
+                        Label(self.tag_dictionary.get_item_for_index(score_id), score)
+                        for score_id, score in enumerate(score_dist)
+                    ]
+                    for score_dist in scores
+                ]
+            )
+
+        return tags, all_tags
 
     def _viterbi_decode(self, feats):
         backpointers = []
         backscores = []
+        scores = []
 
         init_vvars = (
             torch.FloatTensor(1, self.tagset_size).to(flair.device).fill_(-10000.0)
@@ -581,11 +615,21 @@ class SequenceTagger(flair.nn.Model):
             _, idx = torch.max(backscore, 0)
             prediction = idx.item()
             best_scores.append(softmax[prediction].item())
+            scores.append([elem.item() for elem in softmax.flatten()])
+        # This has been taken from https://github.com/zalandoresearch/flair/pull/642
+        swap_best_path, swap_max_score = (
+            best_path[0],
+            scores[-1].index(max(scores[-1])),
+        )
+        scores[-1][swap_best_path], scores[-1][swap_max_score] = (
+            scores[-1][swap_max_score],
+            scores[-1][swap_best_path],
+        )
 
         start = best_path.pop()
         assert start == self.tag_dictionary.get_idx_for_item(START_TAG)
         best_path.reverse()
-        return best_scores, best_path
+        return best_scores, best_path, scores
 
     def _forward_alg(self, feats, lens_):
 
@@ -714,9 +758,9 @@ class SequenceTagger(flair.nn.Model):
 
         model_map["pos"] = "/".join(
             [
-                aws_resource_path,
-                "POS-ontonotes--h256-l1-b32-%2Bmix-forward%2Bmix-backward--v0.2",
-                "en-pos-ontonotes-v0.2.pt",
+                aws_resource_path_v04,
+                "POS-ontonotes--h256-l1-b32-p3-0.5-%2Bglove%2Bnews-forward%2Bnews-backward-normal-locked0.5-word0.05--v0.4_0",
+                "en-pos-ontonotes-v0.4.pt",
             ]
         )
 
@@ -760,9 +804,9 @@ class SequenceTagger(flair.nn.Model):
 
         model_map["chunk"] = "/".join(
             [
-                aws_resource_path,
-                "NP-conll2000--h256-l1-b32-%2Bnews-forward%2Bnews-backward--v0.2",
-                "en-chunk-conll2000-v0.2.pt",
+                aws_resource_path_v04,
+                "NP-conll2000--h256-l1-b32-p3-0.5-%2Bnews-forward%2Bnews-backward-normal-locked0.5-word0.05--v0.4_0",
+                "en-chunk-conll2000-v0.4.pt",
             ]
         )
 
@@ -799,11 +843,7 @@ class SequenceTagger(flair.nn.Model):
         )
 
         model_map["de-ner-germeval"] = "/".join(
-            [
-                aws_resource_path,
-                "NER-germeval--h256-l1-b32-%2Bde-fasttext%2Bgerman-forward%2Bgerman-backward--v0.2",
-                "de-ner-germeval-v0.3.pt",
-            ]
+            [aws_resource_path_v04, "NER-germeval", "de-ner-germeval-0.4.1.pt"]
         )
 
         model_map["fr-ner"] = "/".join(
@@ -818,3 +858,16 @@ class SequenceTagger(flair.nn.Model):
             model_name = cached_path(model_map[model_name], cache_dir=cache_dir)
 
         return model_name
+
+    def get_transition_matrix(self):
+        data = []
+        for to_idx, row in enumerate(self.transitions):
+            for from_idx, column in enumerate(row):
+                row = [
+                    self.tag_dictionary.get_item_for_index(from_idx),
+                    self.tag_dictionary.get_item_for_index(to_idx),
+                    column.item(),
+                ]
+                data.append(row)
+            data.append(["----"])
+        print(tabulate(data, headers=["FROM", "TO", "SCORE"]))

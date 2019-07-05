@@ -2,13 +2,14 @@ from pathlib import Path
 from typing import List, Union
 
 import datetime
-import random
-import logging
+
 from torch.optim.sgd import SGD
+from torch.utils.data.dataset import ConcatDataset
 
 import flair
 import flair.nn
 from flair.data import Sentence, MultiCorpus, Corpus
+from flair.datasets import DataLoader
 from flair.training_utils import (
     init_output_file,
     WeightExtractor,
@@ -54,12 +55,15 @@ class ModelTrainer:
         patience: int = 3,
         train_with_dev: bool = False,
         monitor_train: bool = False,
+        monitor_test: bool = False,
         embeddings_in_memory: bool = True,
         checkpoint: bool = False,
         save_final_model: bool = True,
         anneal_with_restarts: bool = False,
-        test_mode: bool = False,
+        shuffle: bool = True,
         param_selection_mode: bool = False,
+        num_workers: int = 8,
+        sampler=None,
         **kwargs,
     ) -> dict:
 
@@ -70,41 +74,39 @@ class ModelTrainer:
         if type(base_path) is str:
             base_path = Path(base_path)
 
-        add_file_handler(log, base_path / "training.log")
+        log_handler = add_file_handler(log, base_path / "training.log")
 
+        log_line(log)
+        log.info(f'Model: "{self.model}"')
+        log_line(log)
+        log.info(f'Corpus: "{self.corpus}"')
+        log_line(log)
+        log.info("Parameters:")
+        log.info(f' - learning_rate: "{learning_rate}"')
+        log.info(f' - mini_batch_size: "{mini_batch_size}"')
+        log.info(f' - patience: "{patience}"')
+        log.info(f' - anneal_factor: "{anneal_factor}"')
+        log.info(f' - max_epochs: "{max_epochs}"')
+        log.info(f' - shuffle: "{shuffle}"')
+        log.info(f' - train_with_dev: "{train_with_dev}"')
+        log_line(log)
+        log.info(f'Model training base path: "{base_path}"')
         log_line(log)
         log.info(f"Evaluation method: {evaluation_metric.name}")
 
         # determine what splits (train, dev, test) to evaluate and log
         log_train = True if monitor_train else False
-        log_test = True if (not param_selection_mode and self.corpus.test) else False
+        log_test = (
+            True
+            if (not param_selection_mode and self.corpus.test and monitor_test)
+            else False
+        )
         log_dev = True if not train_with_dev else False
 
+        # prepare loss logging file and set up header
         loss_txt = init_output_file(base_path, "loss.tsv")
-        with open(loss_txt, "a") as f:
-            f.write(f"EPOCH\tTIMESTAMP\tBAD_EPOCHS\tLEARNING_RATE\tTRAIN_LOSS")
 
-            dummy_result, _ = self.model.evaluate(
-                [Sentence("d", labels=["0.1"])],
-                eval_mini_batch_size,
-                embeddings_in_memory,
-            )
-            if log_train:
-                f.write(
-                    "\tTRAIN_" + "\tTRAIN_".join(dummy_result.log_header.split("\t"))
-                )
-            if log_dev:
-                f.write(
-                    "\tDEV_LOSS\tDEV_"
-                    + "\tDEV_".join(dummy_result.log_header.split("\t"))
-                )
-            if log_test:
-                f.write(
-                    "\tTEST_LOSS\tTEST_"
-                    + "\tTEST_".join(dummy_result.log_header.split("\t"))
-                )
-
-            weight_extractor = WeightExtractor(base_path)
+        weight_extractor = WeightExtractor(base_path)
 
         optimizer = self.optimizer(self.model.parameters(), lr=learning_rate, **kwargs)
         if self.optimizer_state is not None:
@@ -136,7 +138,10 @@ class ModelTrainer:
 
         # if training also uses dev data, include in training set
         if train_with_dev:
-            train_data.extend(self.corpus.dev)
+            train_data = ConcatDataset([self.corpus.train, self.corpus.dev])
+
+        if sampler is not None:
+            sampler = sampler(train_data)
 
         dev_score_history = []
         dev_loss_history = []
@@ -148,10 +153,8 @@ class ModelTrainer:
 
             for epoch in range(0 + self.epoch, max_epochs + self.epoch):
                 log_line(log)
-                try:
-                    bad_epochs = scheduler.num_bad_epochs
-                except:
-                    bad_epochs = 0
+
+                # get new learning rate
                 for group in optimizer.param_groups:
                     learning_rate = group["lr"]
 
@@ -173,21 +176,26 @@ class ModelTrainer:
                     log_line(log)
                     break
 
-                if not test_mode:
-                    random.shuffle(train_data)
-
-                batches = [
-                    train_data[x : x + mini_batch_size]
-                    for x in range(0, len(train_data), mini_batch_size)
-                ]
+                batch_loader = DataLoader(
+                    train_data,
+                    batch_size=mini_batch_size,
+                    shuffle=shuffle,
+                    num_workers=num_workers,
+                    sampler=sampler,
+                )
 
                 self.model.train()
 
                 train_loss: float = 0
-                seen_sentences = 0
-                modulo = max(1, int(len(batches) / 10))
 
-                for batch_no, batch in enumerate(batches):
+                seen_batches = 0
+                total_number_of_batches = len(batch_loader)
+
+                modulo = max(1, int(total_number_of_batches / 10))
+
+                # process mini-batches
+                for batch_no, batch in enumerate(batch_loader):
+
                     loss = self.model.forward_loss(batch)
 
                     optimizer.zero_grad()
@@ -195,7 +203,7 @@ class ModelTrainer:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
                     optimizer.step()
 
-                    seen_sentences += len(batch)
+                    seen_batches += 1
                     train_loss += loss.item()
 
                     clear_embeddings(
@@ -204,69 +212,121 @@ class ModelTrainer:
 
                     if batch_no % modulo == 0:
                         log.info(
-                            f"epoch {epoch + 1} - iter {batch_no}/{len(batches)} - loss "
-                            f"{train_loss / seen_sentences:.8f}"
+                            f"epoch {epoch + 1} - iter {batch_no}/{total_number_of_batches} - loss "
+                            f"{train_loss / seen_batches:.8f}"
                         )
-                        iteration = epoch * len(batches) + batch_no
+                        iteration = epoch * total_number_of_batches + batch_no
                         if not param_selection_mode:
                             weight_extractor.extract_weights(
                                 self.model.state_dict(), iteration
                             )
 
-                train_loss /= len(train_data)
+                train_loss /= seen_batches
 
                 self.model.eval()
 
                 log_line(log)
                 log.info(
-                    f"EPOCH {epoch + 1} done: loss {train_loss:.4f} - lr {learning_rate:.4f} - bad epochs {bad_epochs}"
+                    f"EPOCH {epoch + 1} done: loss {train_loss:.4f} - lr {learning_rate:.4f}"
                 )
 
                 # anneal against train loss if training with dev, otherwise anneal against dev score
                 current_score = train_loss
 
+                # evaluate on train / dev / test split depending on training settings
+                result_line: str = ""
+
+                if log_train:
+                    train_eval_result, train_loss = self.model.evaluate(
+                        self.corpus.train,
+                        eval_mini_batch_size,
+                        embeddings_in_memory,
+                        num_workers=num_workers,
+                    )
+                    result_line += f"\t{train_eval_result.log_line}"
+
+                if log_dev:
+                    dev_eval_result, dev_loss = self.model.evaluate(
+                        self.corpus.dev,
+                        eval_mini_batch_size,
+                        embeddings_in_memory,
+                        num_workers=num_workers,
+                    )
+                    result_line += f"\t{dev_loss}\t{dev_eval_result.log_line}"
+                    log.info(
+                        f"DEV : loss {dev_loss} - score {dev_eval_result.main_score}"
+                    )
+                    # calculate scores using dev data if available
+                    # append dev score to score history
+                    dev_score_history.append(dev_eval_result.main_score)
+                    dev_loss_history.append(dev_loss)
+
+                    current_score = dev_eval_result.main_score
+
+                if log_test:
+                    test_eval_result, test_loss = self.model.evaluate(
+                        self.corpus.test,
+                        eval_mini_batch_size,
+                        embeddings_in_memory,
+                        base_path / "test.tsv",
+                        num_workers=num_workers,
+                    )
+                    result_line += f"\t{test_loss}\t{test_eval_result.log_line}"
+                    log.info(
+                        f"TEST : loss {test_loss} - score {test_eval_result.main_score}"
+                    )
+
+                # determine learning rate annealing through scheduler
+                scheduler.step(current_score)
+
+                train_loss_history.append(train_loss)
+
+                # determine bad epoch number
+                try:
+                    bad_epochs = scheduler.num_bad_epochs
+                except:
+                    bad_epochs = 0
+                for group in optimizer.param_groups:
+                    new_learning_rate = group["lr"]
+                if new_learning_rate != previous_learning_rate:
+                    bad_epochs = patience + 1
+
+                # log bad epochs
+                log.info(f"BAD EPOCHS (no improvement): {bad_epochs}")
+
+                # output log file
                 with open(loss_txt, "a") as f:
+
+                    # make headers on first epoch
+                    if epoch == 0:
+                        f.write(
+                            f"EPOCH\tTIMESTAMP\tBAD_EPOCHS\tLEARNING_RATE\tTRAIN_LOSS"
+                        )
+
+                        if log_train:
+                            f.write(
+                                "\tTRAIN_"
+                                + "\tTRAIN_".join(
+                                    train_eval_result.log_header.split("\t")
+                                )
+                            )
+                        if log_dev:
+                            f.write(
+                                "\tDEV_LOSS\tDEV_"
+                                + "\tDEV_".join(dev_eval_result.log_header.split("\t"))
+                            )
+                        if log_test:
+                            f.write(
+                                "\tTEST_LOSS\tTEST_"
+                                + "\tTEST_".join(
+                                    test_eval_result.log_header.split("\t")
+                                )
+                            )
 
                     f.write(
                         f"\n{epoch}\t{datetime.datetime.now():%H:%M:%S}\t{bad_epochs}\t{learning_rate:.4f}\t{train_loss}"
                     )
-
-                    if log_train:
-                        train_eval_result, train_loss = self.model.evaluate(
-                            self.corpus.train,
-                            eval_mini_batch_size,
-                            embeddings_in_memory,
-                        )
-                        f.write(f"\t{train_eval_result.log_line}")
-
-                    if log_dev:
-                        dev_eval_result, dev_loss = self.model.evaluate(
-                            self.corpus.dev, eval_mini_batch_size, embeddings_in_memory
-                        )
-                        f.write(f"\t{dev_loss}\t{dev_eval_result.log_line}")
-
-                        # calculate scores using dev data if available
-                        # append dev score to score history
-                        dev_score_history.append(dev_eval_result.main_score)
-                        dev_loss_history.append(dev_loss)
-
-                        current_score = dev_eval_result.main_score
-
-                    if log_test:
-                        test_eval_result, test_loss = self.model.evaluate(
-                            self.corpus.test,
-                            eval_mini_batch_size,
-                            embeddings_in_memory,
-                            base_path / "test.tsv",
-                        )
-                        f.write(f"\t{test_loss}\t{test_eval_result.log_line}")
-                        log.info(
-                            f"TEST : loss {test_loss} - score {test_eval_result.main_score}"
-                        )
-
-                scheduler.step(current_score)
-
-                train_loss_history.append(train_loss)
+                    f.write(result_line)
 
                 # if checkpoint is enable, save model at each epoch
                 if checkpoint and not param_selection_mode:
@@ -301,11 +361,17 @@ class ModelTrainer:
         # test best model if test data is present
         if self.corpus.test:
             final_score = self.final_test(
-                base_path, embeddings_in_memory, evaluation_metric, eval_mini_batch_size
+                base_path,
+                embeddings_in_memory,
+                evaluation_metric,
+                eval_mini_batch_size,
+                num_workers,
             )
         else:
             final_score = 0
             log.info("Test data not provided setting final score to 0")
+
+        log.removeHandler(log_handler)
 
         return {
             "test_score": final_score,
@@ -320,6 +386,7 @@ class ModelTrainer:
         embeddings_in_memory: bool,
         evaluation_metric: EvaluationMetric,
         eval_mini_batch_size: int,
+        num_workers: int = 8,
     ):
 
         log_line(log)
@@ -334,6 +401,8 @@ class ModelTrainer:
             self.corpus.test,
             eval_mini_batch_size=eval_mini_batch_size,
             embeddings_in_memory=embeddings_in_memory,
+            out_path=base_path / "test.tsv",
+            num_workers=num_workers,
         )
 
         test_results: Result = test_results
@@ -399,11 +468,8 @@ class ModelTrainer:
         )
 
         train_data = self.corpus.train
-        random.shuffle(train_data)
-        batches = [
-            train_data[x : x + mini_batch_size]
-            for x in range(0, len(train_data), mini_batch_size)
-        ][:iterations]
+
+        batch_loader = DataLoader(train_data, batch_size=mini_batch_size, shuffle=True)
 
         scheduler = ExpAnnealLR(optimizer, end_learning_rate, iterations)
 
@@ -411,7 +477,7 @@ class ModelTrainer:
         model_device = next(self.model.parameters()).device
         self.model.train()
 
-        for itr, batch in enumerate(batches):
+        for itr, batch in enumerate(batch_loader):
             loss = self.model.forward_loss(batch)
 
             optimizer.zero_grad()
@@ -437,6 +503,9 @@ class ModelTrainer:
             if stop_early and (loss_item > 4 * best_loss or torch.isnan(loss)):
                 log_line(log)
                 log.info("loss diverged - stopping early!")
+                break
+
+            if itr > iterations:
                 break
 
             with open(learning_rate_tsv, "a") as f:
