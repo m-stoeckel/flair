@@ -2,6 +2,7 @@ import os
 import re
 import logging
 from abc import abstractmethod
+from collections import Counter
 from pathlib import Path
 from typing import List, Union, Dict
 
@@ -29,6 +30,7 @@ from pytorch_pretrained_bert.modeling_transfo_xl import (
 )
 
 import flair
+from flair.data import Corpus
 from .nn import LockedDropout, WordDropout
 from .data import Dictionary, Token, Sentence
 from .file_utils import cached_path, open_inside_zip
@@ -170,6 +172,7 @@ class WordEmbeddings(TokenEmbeddings):
         :param embeddings: one of: 'glove', 'extvec', 'crawl' or two-letter language code or custom
         If you want to use a custom embedding file, just pass the path to the embeddings as embeddings variable.
         """
+        self.embeddings = embeddings
 
         old_base_path = (
             "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings/"
@@ -338,6 +341,93 @@ class WordEmbeddings(TokenEmbeddings):
     def __str__(self):
         return self.name
 
+    def extra_repr(self):
+        return f"'{self.embeddings}'"
+
+
+class OneHotEmbeddings(TokenEmbeddings):
+    """One-hot encoded embeddings."""
+
+    def __init__(
+        self,
+        corpus=Union[Corpus, List[Sentence]],
+        field: str = "text",
+        embedding_length: int = 300,
+        min_freq: int = 3,
+    ):
+
+        super().__init__()
+        self.name = "one-hot"
+        self.static_embeddings = False
+        self.min_freq = min_freq
+
+        tokens = list(map((lambda s: s.tokens), corpus.train))
+        tokens = [token for sublist in tokens for token in sublist]
+
+        if field == "text":
+            most_common = Counter(list(map((lambda t: t.text), tokens))).most_common()
+        else:
+            most_common = Counter(
+                list(map((lambda t: t.get_tag(field)), tokens))
+            ).most_common()
+
+        tokens = []
+        for token, freq in most_common:
+            if freq < min_freq:
+                break
+            tokens.append(token)
+
+        self.vocab_dictionary: Dictionary = Dictionary()
+        for token in tokens:
+            self.vocab_dictionary.add_item(token)
+
+        # max_tokens = 500
+        self.__embedding_length = embedding_length
+
+        print(self.vocab_dictionary.idx2item)
+        print(f"vocabulary size of {len(self.vocab_dictionary)}")
+
+        # model architecture
+        self.embedding_layer = torch.nn.Embedding(
+            len(self.vocab_dictionary), self.__embedding_length
+        )
+        torch.nn.init.xavier_uniform_(self.embedding_layer.weight)
+
+    @property
+    def embedding_length(self) -> int:
+        return self.__embedding_length
+
+    def _add_embeddings_internal(self, sentences: List[Sentence]) -> List[Sentence]:
+
+        one_hot_sentences = []
+        for i, sentence in enumerate(sentences):
+            context_idxs = [
+                self.vocab_dictionary.get_idx_for_item(t.text) for t in sentence.tokens
+            ]
+
+            one_hot_sentences.extend(context_idxs)
+
+        one_hot_sentences = torch.tensor(one_hot_sentences, dtype=torch.long).to(
+            flair.device
+        )
+
+        embedded = self.embedding_layer.forward(one_hot_sentences)
+
+        index = 0
+        for sentence in sentences:
+            for token in sentence:
+                embedding = embedded[index]
+                token.set_embedding(self.name, embedding)
+                index += 1
+
+        return sentences
+
+    def __str__(self):
+        return self.name
+
+    def extra_repr(self):
+        return "min_freq={}".format(self.min_freq)
+
 
 class BPEmbSerializable(BPEmb):
     def __getstate__(self):
@@ -368,6 +458,104 @@ class BPEmbSerializable(BPEmb):
 
         # once the modes if there, load it with sentence piece
         state["spm"] = sentencepiece_load(self.model_file)
+
+
+class MuseCrosslingualEmbeddings(TokenEmbeddings):
+    def __init__(self,):
+        self.name: str = f"muse-crosslingual"
+        self.static_embeddings = True
+        self.__embedding_length: int = 300
+        self.language_embeddings = {}
+        super().__init__()
+
+    def _add_embeddings_internal(self, sentences: List[Sentence]) -> List[Sentence]:
+
+        for i, sentence in enumerate(sentences):
+
+            language_code = sentence.get_language_code()
+            print(language_code)
+            supported = [
+                "en",
+                "de",
+                "bg",
+                "ca",
+                "hr",
+                "cs",
+                "da",
+                "nl",
+                "et",
+                "fi",
+                "fr",
+                "el",
+                "he",
+                "hu",
+                "id",
+                "it",
+                "mk",
+                "no",
+                "pl",
+                "pt",
+                "ro",
+                "ru",
+                "sk",
+            ]
+            if language_code not in supported:
+                language_code = "en"
+
+            if language_code not in self.language_embeddings:
+                log.info(f"Loading up MUSE embeddings for '{language_code}'!")
+                # download if necessary
+                webpath = "https://alan-nlp.s3.eu-central-1.amazonaws.com/resources/embeddings-muse"
+                cache_dir = Path("embeddings") / "MUSE"
+                cached_path(
+                    f"{webpath}/muse.{language_code}.vec.gensim.vectors.npy",
+                    cache_dir=cache_dir,
+                )
+                embeddings_file = cached_path(
+                    f"{webpath}/muse.{language_code}.vec.gensim", cache_dir=cache_dir
+                )
+
+                # load the model
+                self.language_embeddings[
+                    language_code
+                ] = gensim.models.KeyedVectors.load(str(embeddings_file))
+
+            current_embedding_model = self.language_embeddings[language_code]
+
+            for token, token_idx in zip(sentence.tokens, range(len(sentence.tokens))):
+
+                if "field" not in self.__dict__ or self.field is None:
+                    word = token.text
+                else:
+                    word = token.get_tag(self.field).value
+
+                if word in current_embedding_model:
+                    word_embedding = current_embedding_model[word]
+                elif word.lower() in current_embedding_model:
+                    word_embedding = current_embedding_model[word.lower()]
+                elif re.sub(r"\d", "#", word.lower()) in current_embedding_model:
+                    word_embedding = current_embedding_model[
+                        re.sub(r"\d", "#", word.lower())
+                    ]
+                elif re.sub(r"\d", "0", word.lower()) in current_embedding_model:
+                    word_embedding = current_embedding_model[
+                        re.sub(r"\d", "0", word.lower())
+                    ]
+                else:
+                    word_embedding = np.zeros(self.embedding_length, dtype="float")
+
+                word_embedding = torch.FloatTensor(word_embedding)
+
+                token.set_embedding(self.name, word_embedding)
+
+        return sentences
+
+    @property
+    def embedding_length(self) -> int:
+        return self.__embedding_length
+
+    def __str__(self):
+        return self.name
 
 
 class BytePairEmbeddings(TokenEmbeddings):
@@ -426,6 +614,9 @@ class BytePairEmbeddings(TokenEmbeddings):
     def __str__(self):
         return self.name
 
+    def extra_repr(self):
+        return "model={}".format(self.name)
+
 
 class ELMoEmbeddings(TokenEmbeddings):
     """Contextual word embeddings using word-level LM, as proposed in Peters et al., 2018."""
@@ -470,7 +661,13 @@ class ELMoEmbeddings(TokenEmbeddings):
         # put on Cuda if available
         from flair import device
 
-        cuda_device = 0 if str(device) != "cpu" else -1
+        if re.fullmatch(r"cuda:[0-9]+", str(device)):
+            cuda_device = int(str(device).split(":")[-1])
+        elif str(device) == "cpu":
+            cuda_device = -1
+        else:
+            cuda_device = 0
+
         self.ee = allennlp.commands.elmo.ElmoEmbedder(
             options_file=options_file, weight_file=weight_file, cuda_device=cuda_device
         )
@@ -729,7 +926,12 @@ class OpenAIGPTEmbeddings(TokenEmbeddings):
 class CharacterEmbeddings(TokenEmbeddings):
     """Character embeddings of words, as proposed in Lample et al., 2016."""
 
-    def __init__(self, path_to_char_dict: str = None):
+    def __init__(
+        self,
+        path_to_char_dict: str = None,
+        char_embedding_dim: int = 25,
+        hidden_size_char: int = 25,
+    ):
         """Uses the default character dictionary if none provided."""
 
         super().__init__()
@@ -744,8 +946,8 @@ class CharacterEmbeddings(TokenEmbeddings):
                 path_to_char_dict
             )
 
-        self.char_embedding_dim: int = 25
-        self.hidden_size_char: int = 25
+        self.char_embedding_dim: int = char_embedding_dim
+        self.hidden_size_char: int = hidden_size_char
         self.char_embedding = torch.nn.Embedding(
             len(self.char_dictionary.item2idx), self.char_embedding_dim
         )
@@ -857,186 +1059,121 @@ class FlairEmbeddings(TokenEmbeddings):
 
         cache_dir = Path("embeddings")
 
-        # multilingual forward (English, German, French, Italian, Dutch, Polish)
-        if model.lower() == "multi-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-multi-forward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # multilingual backward  (English, German, French, Italian, Dutch, Polish)
-        elif model.lower() == "multi-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-multi-backward-v0.1.pt"
+        aws_path: str = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources"
+
+        self.PRETRAINED_MODEL_ARCHIVE_MAP = {
+            # multilingual models
+            "multi-forward": f"{aws_path}/embeddings-v0.4/lm-multi-forward-v0.1.pt",
+            "multi-backward": f"{aws_path}/embeddings-v0.4/lm-multi-backward-v0.1.pt",
+            "multi-forward-fast": f"{aws_path}/embeddings-v0.4/lm-multi-forward-fast-v0.1.pt",
+            "multi-backward-fast": f"{aws_path}/embeddings-v0.4/lm-multi-backward-fast-v0.1.pt",
+            # English models
+            "news-forward": f"{aws_path}/embeddings-v0.4.1/big-news-forward--h2048-l1-d0.05-lr30-0.25-20/news-forward-0.4.1.pt",
+            "news-backward": f"{aws_path}/embeddings-v0.4.1/big-news-backward--h2048-l1-d0.05-lr30-0.25-20/news-backward-0.4.1.pt",
+            "news-forward-fast": f"{aws_path}/embeddings/lm-news-english-forward-1024-v0.2rc.pt",
+            "news-backward-fast": f"{aws_path}/embeddings/lm-news-english-backward-1024-v0.2rc.pt",
+            "mix-forward": f"{aws_path}/embeddings/lm-mix-english-forward-v0.2rc.pt",
+            "mix-backward": f"{aws_path}/embeddings/lm-mix-english-backward-v0.2rc.pt",
+            # Arabic
+            "ar-forward": f"{aws_path}/embeddings-stefan-it/lm-ar-opus-large-forward-v0.1.pt",
+            "ar-backward": f"{aws_path}/embeddings-stefan-it/lm-ar-opus-large-backward-v0.1.pt",
+            # Bulgarian
+            "bg-forward-fast": f"{aws_path}/embeddings-v0.3/lm-bg-small-forward-v0.1.pt",
+            "bg-backward-fast": f"{aws_path}/embeddings-v0.3/lm-bg-small-backward-v0.1.pt",
+            "bg-forward": f"{aws_path}/embeddings-stefan-it/lm-bg-opus-large-forward-v0.1.pt",
+            "bg-backward": f"{aws_path}/embeddings-stefan-it/lm-bg-opus-large-backward-v0.1.pt",
+            # Czech
+            "cs-forward": f"{aws_path}/embeddings-stefan-it/lm-cs-opus-large-forward-v0.1.pt",
+            "cs-backward": f"{aws_path}/embeddings-stefan-it/lm-cs-opus-large-backward-v0.1.pt",
+            "cs-v0-forward": f"{aws_path}/embeddings-v0.4/lm-cs-large-forward-v0.1.pt",
+            "cs-v0-backward": f"{aws_path}/embeddings-v0.4/lm-cs-large-backward-v0.1.pt",
+            # Danish
+            "da-forward": f"{aws_path}/embeddings-stefan-it/lm-da-opus-large-forward-v0.1.pt",
+            "da-backward": f"{aws_path}/embeddings-stefan-it/lm-da-opus-large-backward-v0.1.pt",
+            # German
+            "de-forward": f"{aws_path}/embeddings/lm-mix-german-forward-v0.2rc.pt",
+            "de-backward": f"{aws_path}/embeddings/lm-mix-german-backward-v0.2rc.pt",
+            "de-historic-ha-forward": f"{aws_path}/embeddings-stefan-it/lm-historic-hamburger-anzeiger-forward-v0.1.pt",
+            "de-historic-ha-backward": f"{aws_path}/embeddings-stefan-it/lm-historic-hamburger-anzeiger-backward-v0.1.pt",
+            "de-historic-wz-forward": f"{aws_path}/embeddings-stefan-it/lm-historic-wiener-zeitung-forward-v0.1.pt",
+            "de-historic-wz-backward": f"{aws_path}/embeddings-stefan-it/lm-historic-wiener-zeitung-backward-v0.1.pt",
+            # Spanish
+            "es-forward": f"{aws_path}/embeddings-v0.4/language_model_es_forward_long/lm-es-forward.pt",
+            "es-backward": f"{aws_path}/embeddings-v0.4/language_model_es_backward_long/lm-es-backward.pt",
+            "es-forward-fast": f"{aws_path}/embeddings-v0.4/language_model_es_forward/lm-es-forward-fast.pt",
+            "es-backward-fast": f"{aws_path}/embeddings-v0.4/language_model_es_backward/lm-es-backward-fast.pt",
+            # Basque
+            "eu-forward": f"{aws_path}/embeddings-stefan-it/lm-eu-opus-large-forward-v0.1.pt",
+            "eu-backward": f"{aws_path}/embeddings-stefan-it/lm-eu-opus-large-backward-v0.1.pt",
+            "eu-v0-forward": f"{aws_path}/embeddings-v0.4/lm-eu-large-forward-v0.1.pt",
+            "eu-v0-backward": f"{aws_path}/embeddings-v0.4/lm-eu-large-backward-v0.1.pt",
+            # Persian
+            "fa-forward": f"{aws_path}/embeddings-stefan-it/lm-fa-opus-large-forward-v0.1.pt",
+            "fa-backward": f"{aws_path}/embeddings-stefan-it/lm-fa-opus-large-backward-v0.1.pt",
+            # Finnish
+            "fi-forward": f"{aws_path}/embeddings-stefan-it/lm-fi-opus-large-forward-v0.1.pt",
+            "fi-backward": f"{aws_path}/embeddings-stefan-it/lm-fi-opus-large-backward-v0.1.pt",
+            # French
+            "fr-forward": f"{aws_path}/embeddings/lm-fr-charlm-forward.pt",
+            "fr-backward": f"{aws_path}/embeddings/lm-fr-charlm-backward.pt",
+            # Hebrew
+            "he-forward": f"{aws_path}/embeddings-stefan-it/lm-he-opus-large-forward-v0.1.pt",
+            "he-backward": f"{aws_path}/embeddings-stefan-it/lm-he-opus-large-backward-v0.1.pt",
+            # Hindi
+            "hi-forward": f"{aws_path}/embeddings-stefan-it/lm-hi-opus-large-forward-v0.1.pt",
+            "hi-backward": f"{aws_path}/embeddings-stefan-it/lm-hi-opus-large-backward-v0.1.pt",
+            # Croatian
+            "hr-forward": f"{aws_path}/embeddings-stefan-it/lm-hr-opus-large-forward-v0.1.pt",
+            "hr-backward": f"{aws_path}/embeddings-stefan-it/lm-hr-opus-large-backward-v0.1.pt",
+            # Indonesian
+            "id-forward": f"{aws_path}/embeddings-stefan-it/lm-id-opus-large-forward-v0.1.pt",
+            "id-backward": f"{aws_path}/embeddings-stefan-it/lm-id-opus-large-backward-v0.1.pt",
+            # Italian
+            "it-forward": f"{aws_path}/embeddings-stefan-it/lm-it-opus-large-forward-v0.1.pt",
+            "it-backward": f"{aws_path}/embeddings-stefan-it/lm-it-opus-large-backward-v0.1.pt",
+            # Japanese
+            "ja-forward": f"{aws_path}/embeddings-v0.4.1/lm__char-forward__ja-wikipedia-3GB/japanese-forward.pt",
+            "ja-backward": f"{aws_path}/embeddings-v0.4.1/lm__char-backward__ja-wikipedia-3GB/japanese-backward.pt",
+            # Dutch
+            "nl-forward": f"{aws_path}/embeddings-stefan-it/lm-nl-opus-large-forward-v0.1.pt",
+            "nl-backward": f"{aws_path}/embeddings-stefan-it/lm-nl-opus-large-backward-v0.1.pt",
+            "nl-v0-forward": f"{aws_path}/embeddings-v0.4/lm-nl-large-forward-v0.1.pt",
+            "nl-v0-backward": f"{aws_path}/embeddings-v0.4/lm-nl-large-backward-v0.1.pt",
+            # Norwegian
+            "no-forward": f"{aws_path}/embeddings-stefan-it/lm-no-opus-large-forward-v0.1.pt",
+            "no-backward": f"{aws_path}/embeddings-stefan-it/lm-no-opus-large-backward-v0.1.pt",
+            # Polish
+            "pl-forward": f"{aws_path}/embeddings/lm-polish-forward-v0.2.pt",
+            "pl-backward": f"{aws_path}/embeddings/lm-polish-backward-v0.2.pt",
+            "pl-opus-forward": f"{aws_path}/embeddings-stefan-it/lm-pl-opus-large-forward-v0.1.pt",
+            "pl-opus-backward": f"{aws_path}/embeddings-stefan-it/lm-pl-opus-large-backward-v0.1.pt",
+            # Portuguese
+            "pt-forward": f"{aws_path}/embeddings-v0.4/lm-pt-forward.pt",
+            "pt-backward": f"{aws_path}/embeddings-v0.4/lm-pt-backward.pt",
+            # Pubmed
+            "pubmed-forward": f"{aws_path}/embeddings-v0.4.1/pubmed-2015-fw-lm.pt",
+            "pubmed-backward": f"{aws_path}/embeddings-v0.4.1/pubmed-2015-bw-lm.pt",
+            # Slovenian
+            "sl-forward": f"{aws_path}/embeddings-stefan-it/lm-sl-opus-large-forward-v0.1.pt",
+            "sl-backward": f"{aws_path}/embeddings-stefan-it/lm-sl-opus-large-backward-v0.1.pt",
+            "sl-v0-forward": f"{aws_path}/embeddings-v0.3/lm-sl-large-forward-v0.1.pt",
+            "sl-v0-backward": f"{aws_path}/embeddings-v0.3/lm-sl-large-backward-v0.1.pt",
+            # Swedish
+            "sv-forward": f"{aws_path}/embeddings-stefan-it/lm-sv-opus-large-forward-v0.1.pt",
+            "sv-backward": f"{aws_path}/embeddings-stefan-it/lm-sv-opus-large-backward-v0.1.pt",
+            "sv-v0-forward": f"{aws_path}/embeddings-v0.4/lm-sv-large-forward-v0.1.pt",
+            "sv-v0-backward": f"{aws_path}/embeddings-v0.4/lm-sv-large-backward-v0.1.pt",
+        }
+
+        # load model if in pretrained model map
+        if model.lower() in self.PRETRAINED_MODEL_ARCHIVE_MAP:
+            base_path = self.PRETRAINED_MODEL_ARCHIVE_MAP[model.lower()]
             model = cached_path(base_path, cache_dir=cache_dir)
 
-        # multilingual forward fast (English, German, French, Italian, Dutch, Polish)
-        elif model.lower() == "multi-forward-fast":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-multi-forward-fast-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # multilingual backward fast (English, German, French, Italian, Dutch, Polish)
-        elif model.lower() == "multi-backward-fast":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-multi-backward-fast-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # news-english-forward
-        elif model.lower() == "news-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4.1/big-news-forward--h2048-l1-d0.05-lr30-0.25-20/news-forward-0.4.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # news-english-backward
-        elif model.lower() == "news-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4.1/big-news-backward--h2048-l1-d0.05-lr30-0.25-20/news-backward-0.4.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # news-english-forward
-        elif model.lower() == "news-forward-fast":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings/lm-news-english-forward-1024-v0.2rc.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # news-english-backward
-        elif model.lower() == "news-backward-fast":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings/lm-news-english-backward-1024-v0.2rc.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # mix-english-forward
-        elif model.lower() == "mix-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings/lm-mix-english-forward-v0.2rc.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # mix-english-backward
-        elif model.lower() == "mix-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings/lm-mix-english-backward-v0.2rc.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # mix-german-forward
-        elif model.lower() == "german-forward" or model.lower() == "de-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings/lm-mix-german-forward-v0.2rc.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # mix-german-backward
-        elif model.lower() == "german-backward" or model.lower() == "de-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings/lm-mix-german-backward-v0.2rc.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # common crawl Polish forward
-        elif model.lower() == "polish-forward" or model.lower() == "pl-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings/lm-polish-forward-v0.2.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # common crawl Polish backward
-        elif model.lower() == "polish-backward" or model.lower() == "pl-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings/lm-polish-backward-v0.2.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # Slovenian forward
-        elif model.lower() == "slovenian-forward" or model.lower() == "sl-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.3/lm-sl-large-forward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # Slovenian backward
-        elif model.lower() == "slovenian-backward" or model.lower() == "sl-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.3/lm-sl-large-backward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # Bulgarian forward
-        elif model.lower() == "bulgarian-forward" or model.lower() == "bg-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.3/lm-bg-small-forward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # Bulgarian backward
-        elif model.lower() == "bulgarian-backward" or model.lower() == "bg-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.3/lm-bg-small-backward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # Dutch forward
-        elif model.lower() == "dutch-forward" or model.lower() == "nl-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-nl-large-forward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # Dutch backward
-        elif model.lower() == "dutch-backward" or model.lower() == "nl-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-nl-large-backward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # Swedish forward
-        elif model.lower() == "swedish-forward" or model.lower() == "sv-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-sv-large-forward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # Swedish backward
-        elif model.lower() == "swedish-backward" or model.lower() == "sv-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-sv-large-backward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # French forward
-        elif model.lower() == "french-forward" or model.lower() == "fr-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings/lm-fr-charlm-forward.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # French backward
-        elif model.lower() == "french-backward" or model.lower() == "fr-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings/lm-fr-charlm-backward.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # Czech forward
-        elif model.lower() == "czech-forward" or model.lower() == "cs-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-cs-large-forward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # Czech backward
-        elif model.lower() == "czech-backward" or model.lower() == "cs-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-cs-large-backward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # Portuguese forward
-        elif model.lower() == "portuguese-forward" or model.lower() == "pt-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-pt-forward.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # Portuguese backward
-        elif model.lower() == "portuguese-backward" or model.lower() == "pt-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-pt-backward.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # Basque forward
-        elif model.lower() == "basque-forward" or model.lower() == "eu-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-eu-large-forward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # Basque backward
-        elif model.lower() == "basque-backward" or model.lower() == "eu-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/lm-eu-large-backward-v0.1.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # Spanish forward fast
-        elif (
-            model.lower() == "spanish-forward-fast"
-            or model.lower() == "es-forward-fast"
-        ):
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/language_model_es_forward/lm-es-forward-fast.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # Spanish backward fast
-        elif (
-            model.lower() == "spanish-backward-fast"
-            or model.lower() == "es-backward-fast"
-        ):
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/language_model_es_backward/lm-es-backward-fast.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # Spanish forward
-        elif model.lower() == "spanish-forward" or model.lower() == "es-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/language_model_es_forward_long/lm-es-forward.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # Spanish backward
-        elif model.lower() == "spanish-backward" or model.lower() == "es-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4/language_model_es_backward_long/lm-es-backward.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # Pubmed forward
-        elif model.lower() == "pubmed-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4.1/pubmed-2015-fw-lm.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # Pubmed backward
-        elif model.lower() == "pubmed-backward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4.1/pubmed-2015-bw-lm.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-
-        # Japanese forward
-        elif model.lower() == "japanese-forward" or model.lower() == "ja-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4.1/lm__char-forward__ja-wikipedia-3GB/japanese-forward.pt"
-            model = cached_path(base_path, cache_dir=cache_dir)
-        # Japanese backward
-        elif model.lower() == "japanese-backward" or model.lower() == "ja-forward":
-            base_path = "https://s3.eu-central-1.amazonaws.com/alan-nlp/resources/embeddings-v0.4.1/lm__char-backward__ja-wikipedia-3GB/japanese-backward.pt"
+        elif replace_with_language_code(model) in self.PRETRAINED_MODEL_ARCHIVE_MAP:
+            base_path = self.PRETRAINED_MODEL_ARCHIVE_MAP[
+                replace_with_language_code(model)
+            ]
             model = cached_path(base_path, cache_dir=cache_dir)
 
         elif not Path(model).exists():
@@ -1814,29 +1951,49 @@ class DocumentMeanEmbeddings(DocumentEmbeddings):
 
 
 class DocumentPoolEmbeddings(DocumentEmbeddings):
-    def __init__(self, embeddings: List[TokenEmbeddings], mode: str = "mean"):
+    def __init__(
+        self,
+        embeddings: List[TokenEmbeddings],
+        fine_tune_mode="linear",
+        pooling: str = "mean",
+    ):
         """The constructor takes a list of embeddings to be combined.
         :param embeddings: a list of token embeddings
-        :param mode: a string which can any value from ['mean', 'max', 'min']
+        :param pooling: a string which can any value from ['mean', 'max', 'min']
         """
         super().__init__()
 
         self.embeddings: StackedEmbeddings = StackedEmbeddings(embeddings=embeddings)
+        self.__embedding_length = self.embeddings.embedding_length
+
+        # optional fine-tuning on top of embedding layer
+        self.fine_tune_mode = fine_tune_mode
+        if self.fine_tune_mode in ["nonlinear", "linear"]:
+            self.embedding_flex = torch.nn.Linear(
+                self.embedding_length, self.embedding_length, bias=False
+            )
+            self.embedding_flex.weight.data.copy_(torch.eye(self.embedding_length))
+
+        if self.fine_tune_mode in ["nonlinear"]:
+            self.embedding_flex_nonlinear = torch.nn.ReLU(self.embedding_length)
+            self.embedding_flex_nonlinear_map = torch.nn.Linear(
+                self.embedding_length, self.embedding_length
+            )
 
         self.__embedding_length: int = self.embeddings.embedding_length
 
         self.to(flair.device)
 
-        self.mode = mode
-        if self.mode == "mean":
+        self.pooling = pooling
+        if self.pooling == "mean":
             self.pool_op = torch.mean
-        elif mode == "max":
+        elif pooling == "max":
             self.pool_op = torch.max
-        elif mode == "min":
+        elif pooling == "min":
             self.pool_op = torch.min
         else:
             raise ValueError(f"Pooling operation for {self.mode!r} is not defined")
-        self.name: str = f"document_{self.mode}"
+        self.name: str = f"document_{self.pooling}"
 
     @property
     def embedding_length(self) -> int:
@@ -1846,36 +2003,38 @@ class DocumentPoolEmbeddings(DocumentEmbeddings):
         """Add embeddings to every sentence in the given list of sentences. If embeddings are already added, updates
         only if embeddings are non-static."""
 
-        everything_embedded: bool = True
-
         # if only one sentence is passed, convert to list of sentence
         if isinstance(sentences, Sentence):
             sentences = [sentences]
 
+        self.embeddings.embed(sentences)
+
         for sentence in sentences:
-            if self.name not in sentence._embeddings.keys():
-                everything_embedded = False
+            word_embeddings = []
+            for token in sentence.tokens:
+                word_embeddings.append(token.get_embedding().unsqueeze(0))
 
-        if not everything_embedded:
+            word_embeddings = torch.cat(word_embeddings, dim=0).to(flair.device)
 
-            self.embeddings.embed(sentences)
+            if self.fine_tune_mode in ["nonlinear", "linear"]:
+                word_embeddings = self.embedding_flex(word_embeddings)
 
-            for sentence in sentences:
-                word_embeddings = []
-                for token in sentence.tokens:
-                    word_embeddings.append(token.get_embedding().unsqueeze(0))
+            if self.fine_tune_mode in ["nonlinear"]:
+                word_embeddings = self.embedding_flex_nonlinear(word_embeddings)
+                word_embeddings = self.embedding_flex_nonlinear_map(word_embeddings)
 
-                word_embeddings = torch.cat(word_embeddings, dim=0).to(flair.device)
+            if self.pooling == "mean":
+                pooled_embedding = self.pool_op(word_embeddings, 0)
+            else:
+                pooled_embedding, _ = self.pool_op(word_embeddings, 0)
 
-                if self.mode == "mean":
-                    pooled_embedding = self.pool_op(word_embeddings, 0)
-                else:
-                    pooled_embedding, _ = self.pool_op(word_embeddings, 0)
-
-                sentence.set_embedding(self.name, pooled_embedding)
+            sentence.set_embedding(self.name, pooled_embedding)
 
     def _add_embeddings_internal(self, sentences: List[Sentence]):
         pass
+
+    def extra_repr(self):
+        return f"fine_tune_mode={self.fine_tune_mode}, pooling={self.pooling}"
 
 
 class DocumentRNNEmbeddings(DocumentEmbeddings):
@@ -1904,7 +2063,7 @@ class DocumentRNNEmbeddings(DocumentEmbeddings):
         :param dropout: the dropout value to be used
         :param word_dropout: the word dropout value to be used, if 0.0 word dropout is not used
         :param locked_dropout: the locked dropout value to be used, if 0.0 locked dropout is not used
-        :param rnn_type: 'GRU', 'LSTM',  'RNN_TANH' or 'RNN_RELU'
+        :param rnn_type: 'GRU' or 'LSTM'
         """
         super().__init__()
 
@@ -1927,17 +2086,25 @@ class DocumentRNNEmbeddings(DocumentEmbeddings):
         if self.reproject_words and reproject_words_dimension is not None:
             self.embeddings_dimension = reproject_words_dimension
 
-        # bidirectional RNN on top of embedding layer
         self.word_reprojection_map = torch.nn.Linear(
             self.length_of_all_token_embeddings, self.embeddings_dimension
         )
-        self.rnn = torch.nn.RNNBase(
-            rnn_type,
-            self.embeddings_dimension,
-            hidden_size,
-            num_layers=rnn_layers,
-            bidirectional=self.bidirectional,
-        )
+
+        # bidirectional RNN on top of embedding layer
+        if rnn_type == "LSTM":
+            self.rnn = torch.nn.LSTM(
+                self.embeddings_dimension,
+                hidden_size,
+                num_layers=rnn_layers,
+                bidirectional=self.bidirectional,
+            )
+        else:
+            self.rnn = torch.nn.GRU(
+                self.embeddings_dimension,
+                hidden_size,
+                num_layers=rnn_layers,
+                bidirectional=self.bidirectional,
+            )
 
         self.name = "document_" + self.rnn._get_name()
 
@@ -1955,6 +2122,8 @@ class DocumentRNNEmbeddings(DocumentEmbeddings):
 
         self.to(flair.device)
 
+        self.eval()
+
     @property
     def embedding_length(self) -> int:
         return self.__embedding_length
@@ -1968,11 +2137,17 @@ class DocumentRNNEmbeddings(DocumentEmbeddings):
 
         self.rnn.zero_grad()
 
-        sentences.sort(key=lambda x: len(x), reverse=True)
+        # the permutation that sorts the sentences by length, descending
+        sort_perm = np.argsort([len(s) for s in sentences])[::-1]
+
+        # the inverse permutation that restores the input order; it's an index tensor therefore LongTensor
+        sort_invperm = np.argsort(sort_perm)
+
+        # sort sentences by number of tokens
+        sentences = [sentences[i] for i in sort_perm]
 
         self.embeddings.embed(sentences)
 
-        # first, sort sentences by number of tokens
         longest_token_sequence_in_batch: int = len(sentences[0])
 
         all_sentence_tensors = []
@@ -2043,6 +2218,9 @@ class DocumentRNNEmbeddings(DocumentEmbeddings):
 
             sentence = sentences[sentence_no]
             sentence.set_embedding(self.name, embedding)
+
+        # restore original order of sentences in the batch
+        sentences = [sentences[i] for i in sort_invperm]
 
     def _add_embeddings_internal(self, sentences: List[Sentence]):
         pass
@@ -2248,11 +2426,11 @@ class DocumentLMEmbeddings(DocumentEmbeddings):
                 if embedding.is_forward_lm:
                     sentence.set_embedding(
                         embedding.name,
-                        sentence[len(sentence)]._embeddings[embedding.name],
+                        sentence[len(sentence) - 1]._embeddings[embedding.name],
                     )
                 else:
                     sentence.set_embedding(
-                        embedding.name, sentence[1]._embeddings[embedding.name]
+                        embedding.name, sentence[0]._embeddings[embedding.name]
                     )
 
         return sentences
@@ -2311,3 +2489,30 @@ class NILCEmbeddings(WordEmbeddings):
 
     def __str__(self):
         return self.name
+
+
+def replace_with_language_code(string: str):
+    string = string.replace("arabic-", "ar-")
+    string = string.replace("basque-", "eu-")
+    string = string.replace("bulgarian-", "bg-")
+    string = string.replace("croatian-", "hr-")
+    string = string.replace("czech-", "cs-")
+    string = string.replace("danish-", "da-")
+    string = string.replace("dutch-", "nl-")
+    string = string.replace("farsi-", "fa-")
+    string = string.replace("persian-", "fa-")
+    string = string.replace("finnish-", "fi-")
+    string = string.replace("french-", "fr-")
+    string = string.replace("german-", "de-")
+    string = string.replace("hebrew-", "he-")
+    string = string.replace("hindi-", "hi-")
+    string = string.replace("indonesian-", "id-")
+    string = string.replace("italian-", "it-")
+    string = string.replace("japanese-", "ja-")
+    string = string.replace("norwegian-", "no")
+    string = string.replace("polish-", "pl-")
+    string = string.replace("portuguese-", "pt-")
+    string = string.replace("slovenian-", "sl-")
+    string = string.replace("spanish-", "es-")
+    string = string.replace("swedish-", "sv-")
+    return string

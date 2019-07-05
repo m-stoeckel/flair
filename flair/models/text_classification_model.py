@@ -1,3 +1,4 @@
+import math
 import warnings
 import logging
 from pathlib import Path
@@ -9,6 +10,7 @@ import torch.nn as nn
 import flair.nn
 import flair.embeddings
 from flair.data import Dictionary, Sentence, Label
+from flair.datasets import DataLoader
 from flair.file_utils import cached_path
 from flair.training_utils import (
     convert_labels_to_one_hot,
@@ -32,14 +34,21 @@ class TextClassifier(flair.nn.Model):
         self,
         document_embeddings: flair.embeddings.DocumentEmbeddings,
         label_dictionary: Dictionary,
-        multi_label: bool,
+        multi_label: bool = None,
+        multi_label_threshold: float = 0.5,
     ):
 
         super(TextClassifier, self).__init__()
 
         self.document_embeddings: flair.embeddings.DocumentRNNEmbeddings = document_embeddings
         self.label_dictionary: Dictionary = label_dictionary
-        self.multi_label = multi_label
+
+        if multi_label is not None:
+            self.multi_label = multi_label
+        else:
+            self.multi_label = self.label_dictionary.multi_label
+
+        self.multi_label_threshold = multi_label_threshold
 
         self.decoder = nn.Linear(
             self.document_embeddings.embedding_length, len(self.label_dictionary)
@@ -47,8 +56,8 @@ class TextClassifier(flair.nn.Model):
 
         self._init_weights()
 
-        if multi_label:
-            self.loss_function = nn.BCELoss()
+        if self.multi_label:
+            self.loss_function = nn.BCEWithLogitsLoss()
         else:
             self.loss_function = nn.CrossEntropyLoss()
 
@@ -103,7 +112,10 @@ class TextClassifier(flair.nn.Model):
         return labels, loss
 
     def predict(
-        self, sentences: Union[Sentence, List[Sentence]], mini_batch_size: int = 32, multi_class_prob: bool = False,
+        self,
+        sentences: Union[Sentence, List[Sentence]],
+        mini_batch_size: int = 32,
+        multi_class_prob: bool = False,
     ) -> List[Sentence]:
         """
         Predicts the class labels for the given sentences. The labels are directly added to the sentences.
@@ -125,7 +137,9 @@ class TextClassifier(flair.nn.Model):
 
             for batch in batches:
                 scores = self.forward(batch)
-                predicted_labels = self._obtain_labels(scores, predict_prob=multi_class_prob)
+                predicted_labels = self._obtain_labels(
+                    scores, predict_prob=multi_class_prob
+                )
 
                 for (sentence, labels) in zip(batch, predicted_labels):
                     sentence.labels = labels
@@ -140,20 +154,26 @@ class TextClassifier(flair.nn.Model):
         eval_mini_batch_size: int = 32,
         embeddings_in_memory: bool = False,
         out_path: Path = None,
+        num_workers: int = 8,
     ) -> (Result, float):
 
         with torch.no_grad():
             eval_loss = 0
 
-            batches = [
-                sentences[x : x + eval_mini_batch_size]
-                for x in range(0, len(sentences), eval_mini_batch_size)
-            ]
+            batch_loader = DataLoader(
+                sentences,
+                batch_size=eval_mini_batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+            )
 
             metric = Metric("Evaluation")
 
             lines: List[str] = []
-            for batch in batches:
+            batch_count: int = 0
+            for batch in batch_loader:
+
+                batch_count += 1
 
                 labels, loss = self.forward_labels_and_loss(batch)
 
@@ -212,7 +232,7 @@ class TextClassifier(flair.nn.Model):
                         ):
                             metric.add_tn(label)
 
-            eval_loss /= len(sentences)
+            eval_loss /= batch_count
 
             detailed_result = (
                 f"\nMICRO_AVG: acc {metric.micro_avg_accuracy()} - f1-score {metric.micro_avg_f_score()}"
@@ -265,7 +285,9 @@ class TextClassifier(flair.nn.Model):
 
         return self._calculate_single_label_loss(scores, sentences)
 
-    def _obtain_labels(self, scores: List[List[float]], predict_prob: bool = False) -> List[List[Label]]:
+    def _obtain_labels(
+        self, scores: List[List[float]], predict_prob: bool = False
+    ) -> List[List[Label]]:
         """
         Predicts the labels of sentences.
         :param scores: the prediction scores from the model
@@ -287,7 +309,7 @@ class TextClassifier(flair.nn.Model):
 
         results = list(map(lambda x: sigmoid(x), label_scores))
         for idx, conf in enumerate(results):
-            if conf > 0.5:
+            if conf > self.multi_label_threshold:
                 label = self.label_dictionary.get_item_for_index(idx)
                 labels.append(Label(label, conf.item()))
 
@@ -311,10 +333,7 @@ class TextClassifier(flair.nn.Model):
     def _calculate_multi_label_loss(
         self, label_scores, sentences: List[Sentence]
     ) -> float:
-        sigmoid = nn.Sigmoid()
-        return self.loss_function(
-            sigmoid(label_scores), self._labels_to_one_hot(sentences)
-        )
+        return self.loss_function(label_scores, self._labels_to_one_hot(sentences))
 
     def _calculate_single_label_loss(
         self, label_scores, sentences: List[Sentence]

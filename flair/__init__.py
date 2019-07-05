@@ -15,10 +15,11 @@ from . import data
 from . import models
 from . import visual
 from . import trainers
+from . import nn
 
 import logging.config
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 logging.config.dictConfig(
     {

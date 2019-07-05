@@ -1,11 +1,14 @@
+import os
 from typing import List, Dict, Union
 import re
 import logging
 from enum import Enum
 from pathlib import Path
 
+from deprecated import deprecated
+
 import flair
-from flair.data import Sentence, TaggedCorpus, Token, MultiCorpus
+from flair.data import Sentence, Corpus, Token, MultiCorpus
 from flair.file_utils import cached_path
 
 log = logging.getLogger("flair")
@@ -99,29 +102,33 @@ class NLPTask(Enum):
 
     # text regression format
     REGRESSION = "regression"
+    WASSA_ANGER = "wassa-anger"
+    WASSA_FEAR = "wassa-fear"
+    WASSA_JOY = "wassa-joy"
+    WASSA_SADNESS = "wassa-sadness"
 
 
 class NLPTaskDataFetcher:
     @staticmethod
+    @deprecated(version="0.4.1", reason="Use 'flair.datasets' instead.")
     def load_corpora(
-            tasks: List[Union[NLPTask, str]], base_path: Path = None
+        tasks: List[Union[NLPTask, str]], base_path: Path = None
     ) -> MultiCorpus:
         return MultiCorpus(
             [NLPTaskDataFetcher.load_corpus(task, base_path) for task in tasks]
         )
 
     @staticmethod
-    def load_corpus(
-            task: Union[NLPTask, str], base_path: [str, Path] = None
-    ) -> TaggedCorpus:
+    @deprecated(version="0.4.1", reason="Use 'flair.datasets' instead.")
+    def load_corpus(task: Union[NLPTask, str], base_path: [str, Path] = None) -> Corpus:
         """
-        Helper function to fetch a TaggedCorpus for a specific NLPTask. For this to work you need to first download
+        Helper function to fetch a Corpus for a specific NLPTask. For this to work you need to first download
         and put into the appropriate folder structure the corresponding NLP task data. The tutorials on
         https://github.com/zalandoresearch/flair give more info on how to do this. Alternatively, you can use this
         code to create your own data fetchers.
         :param task: specification of the NLPTask you wish to get
         :param base_path: path to data folder containing tasks sub folders
-        :return: a TaggedCorpus consisting of train, dev and test data
+        :return: a Corpus consisting of train, dev and test data
         """
 
         # first, try to fetch dataset online
@@ -150,9 +157,9 @@ class NLPTaskDataFetcher:
 
         # many NER tasks follow the CoNLL 03 format with four colulms: text, pos, np and ner tag
         if (
-                task == NLPTask.CONLL_03.value
-                or task == NLPTask.ONTONER.value
-                or task == NLPTask.FASHION.value
+            task == NLPTask.CONLL_03.value
+            or task == NLPTask.ONTONER.value
+            or task == NLPTask.FASHION.value
         ):
             columns = {0: "text", 1: "pos", 2: "np", 3: "ner"}
 
@@ -234,18 +241,23 @@ class NLPTaskDataFetcher:
                 data_folder, columns, tag_to_biloes="ner"
             )
 
+        if task.startswith("wassa"):
+            return NLPTaskDataFetcher.load_classification_corpus(
+                data_folder, use_tokenizer=True
+            )
+
     @staticmethod
+    @deprecated(version="0.4.1", reason="Use 'flair.datasets' instead.")
     def load_column_corpus(
-            data_folder: Union[str, Path],
-            column_format: Dict[int, str],
-            train_file=None,
-            test_file=None,
-            dev_file=None,
-            tag_to_biloes=None,
-            max_sequence_length=None
-    ) -> TaggedCorpus:
+        data_folder: Union[str, Path],
+        column_format: Dict[int, str],
+        train_file=None,
+        test_file=None,
+        dev_file=None,
+        tag_to_biloes=None,
+    ) -> Corpus:
         """
-        Helper function to get a TaggedCorpus from CoNLL column-formatted task data such as CoNLL03 or CoNLL2000.
+        Helper function to get a Corpus from CoNLL column-formatted task data such as CoNLL03 or CoNLL2000.
 
         :param data_folder: base folder with the task data
         :param column_format: a map specifying the column format
@@ -253,8 +265,7 @@ class NLPTaskDataFetcher:
         :param test_file: the name of the test file
         :param dev_file: the name of the dev file, if None, dev data is sampled from train
         :param tag_to_biloes: whether to convert to BILOES tagging scheme
-        :param max_sequence_length:
-        :return: a TaggedCorpus with annotated train, dev and test data
+        :return: a Corpus with annotated train, dev and test data
         """
 
         if type(data_folder) == str:
@@ -325,12 +336,6 @@ class NLPTaskDataFetcher:
             ]
             sentences_train = [x for x in sentences_train if x not in sentences_dev]
 
-        if max_sequence_length is not None:
-            print("Dropping sequences longer than %d" % max_sequence_length)
-            sentences_train = list(filter(lambda s: len(" ".join([t.text for t in s.tokens])) <= max_sequence_length, sentences_train))
-            sentences_test = list(filter(lambda s: len(" ".join([t.text for t in s.tokens])) <= max_sequence_length, sentences_test))
-            sentences_dev = list(filter(lambda s: len(" ".join([t.text for t in s.tokens])) <= max_sequence_length, sentences_dev))
-
         if tag_to_biloes is not None:
             # convert tag scheme to iobes
             for sentence in sentences_train + sentences_test + sentences_dev:
@@ -338,22 +343,23 @@ class NLPTaskDataFetcher:
                     tag_type=tag_to_biloes, target_scheme="iobes"
                 )
 
-        return TaggedCorpus(
+        return Corpus(
             sentences_train, sentences_dev, sentences_test, name=data_folder.name
         )
 
     @staticmethod
+    @deprecated(version="0.4.1", reason="Use 'flair.datasets' instead.")
     def load_ud_corpus(
-            data_folder: Union[str, Path], train_file=None, test_file=None, dev_file=None
-    ) -> TaggedCorpus:
+        data_folder: Union[str, Path], train_file=None, test_file=None, dev_file=None
+    ) -> Corpus:
         """
-        Helper function to get a TaggedCorpus from CoNLL-U column-formatted task data such as the UD corpora
+        Helper function to get a Corpus from CoNLL-U column-formatted task data such as the UD corpora
 
         :param data_folder: base folder with the task data
         :param train_file: the name of the train file
         :param test_file: the name of the test file
         :param dev_file: the name of the dev file, if None, dev data is sampled from train
-        :return: a TaggedCorpus with annotated train, dev and test data
+        :return: a Corpus with annotated train, dev and test data
         """
         # automatically identify train / test / dev files
         if train_file is None:
@@ -379,27 +385,28 @@ class NLPTaskDataFetcher:
         sentences_test: List[Sentence] = NLPTaskDataFetcher.read_conll_ud(test_file)
         sentences_dev: List[Sentence] = NLPTaskDataFetcher.read_conll_ud(dev_file)
 
-        return TaggedCorpus(
+        return Corpus(
             sentences_train, sentences_dev, sentences_test, name=data_folder.name
         )
 
     @staticmethod
+    @deprecated(version="0.4.1", reason="Use 'flair.datasets' instead.")
     def load_classification_corpus(
-            data_folder: Union[str, Path],
-            train_file=None,
-            test_file=None,
-            dev_file=None,
-            use_tokenizer: bool = True,
-            max_tokens_per_doc=-1,
-    ) -> TaggedCorpus:
+        data_folder: Union[str, Path],
+        train_file=None,
+        test_file=None,
+        dev_file=None,
+        use_tokenizer: bool = True,
+        max_tokens_per_doc=-1,
+    ) -> Corpus:
         """
-        Helper function to get a TaggedCorpus from text classification-formatted task data
+        Helper function to get a Corpus from text classification-formatted task data
 
         :param data_folder: base folder with the task data
         :param train_file: the name of the train file
         :param test_file: the name of the test file
         :param dev_file: the name of the dev file, if None, dev data is sampled from train
-        :return: a TaggedCorpus with annotated train, dev and test data
+        :return: a Corpus with annotated train, dev and test data
         """
 
         if type(data_folder) == str:
@@ -462,11 +469,12 @@ class NLPTaskDataFetcher:
             ]
             sentences_train = [x for x in sentences_train if x not in sentences_dev]
 
-        return TaggedCorpus(sentences_train, sentences_dev, sentences_test)
+        return Corpus(sentences_train, sentences_dev, sentences_test)
 
     @staticmethod
+    @deprecated(version="0.4.1", reason="Use 'flair.datasets' instead.")
     def read_text_classification_file(
-            path_to_file: Union[str, Path], max_tokens_per_doc=-1, use_tokenizer=True
+        path_to_file: Union[str, Path], max_tokens_per_doc=-1, use_tokenizer=True
     ) -> List[Sentence]:
         """
         Reads a data file for text classification. The file should contain one document/text per line.
@@ -510,10 +518,11 @@ class NLPTaskDataFetcher:
         return sentences
 
     @staticmethod
+    @deprecated(version="0.4.1", reason="Use 'flair.datasets' instead.")
     def read_column_data(
-            path_to_column_file: Path,
-            column_name_map: Dict[int, str],
-            infer_whitespace_after: bool = True,
+        path_to_column_file: Path,
+        column_name_map: Dict[int, str],
+        infer_whitespace_after: bool = True,
     ):
         """
         Reads a file in column format and produces a list of Sentence with tokenlevel annotation as specified in the
@@ -576,6 +585,7 @@ class NLPTaskDataFetcher:
         return sentences
 
     @staticmethod
+    @deprecated(version="0.4.1", reason="Use 'flair.datasets' instead.")
     def read_conll_ud(path_to_conll_file: Path) -> List[Sentence]:
         """
        Reads a file in CoNLL-U format and produces a list of Sentence with full morphosyntactic annotation
@@ -650,21 +660,21 @@ class NLPTaskDataFetcher:
                 import gzip, shutil
 
                 with gzip.open(
-                        Path(flair.cache_root) / "datasets" / task.value / "train.txt.gz",
-                        "rb",
+                    Path(flair.cache_root) / "datasets" / task.value / "train.txt.gz",
+                    "rb",
                 ) as f_in:
                     with open(
-                            Path(flair.cache_root) / "datasets" / task.value / "train.txt",
-                            "wb",
+                        Path(flair.cache_root) / "datasets" / task.value / "train.txt",
+                        "wb",
                     ) as f_out:
                         shutil.copyfileobj(f_in, f_out)
                 with gzip.open(
-                        Path(flair.cache_root) / "datasets" / task.value / "test.txt.gz",
-                        "rb",
+                    Path(flair.cache_root) / "datasets" / task.value / "test.txt.gz",
+                    "rb",
                 ) as f_in:
                     with open(
-                            Path(flair.cache_root) / "datasets" / task.value / "test.txt",
-                            "wb",
+                        Path(flair.cache_root) / "datasets" / task.value / "test.txt",
+                        "wb",
                     ) as f_out:
                         shutil.copyfileobj(f_in, f_out)
 
@@ -679,8 +689,8 @@ class NLPTaskDataFetcher:
                 import tarfile, shutil
 
                 with tarfile.open(
-                        Path(flair.cache_root) / "datasets" / task.value / "eiec_v1.0.tgz",
-                        "r:gz",
+                    Path(flair.cache_root) / "datasets" / task.value / "eiec_v1.0.tgz",
+                    "r:gz",
                 ) as f_in:
                     corpus_files = (
                         "eiec_v1.0/named_ent_eu.train",
@@ -701,11 +711,11 @@ class NLPTaskDataFetcher:
                 import tarfile
 
                 with tarfile.open(
-                        Path(flair.cache_root)
-                        / "datasets"
-                        / task.value
-                        / "aclImdb_v1.tar.gz",
-                        "r:gz",
+                    Path(flair.cache_root)
+                    / "datasets"
+                    / task.value
+                    / "aclImdb_v1.tar.gz",
+                    "r:gz",
                 ) as f_in:
                     datasets = ["train", "test"]
                     labels = ["pos", "neg"]
@@ -724,7 +734,7 @@ class NLPTaskDataFetcher:
                                 current_path = data_path / "aclImdb" / dataset / label
                                 for file_name in current_path.iterdir():
                                     if file_name.is_file() and file_name.name.endswith(
-                                            ".txt"
+                                        ".txt"
                                     ):
                                         f_p.write(
                                             f"__label__{label} "
@@ -751,15 +761,15 @@ class NLPTaskDataFetcher:
 
             if not data_file.is_file():
                 for original_filename, new_filename in zip(
-                        original_filenames, new_filenames
+                    original_filenames, new_filenames
                 ):
                     with open(
-                            data_path / "original" / original_filename,
-                            "rt",
-                            encoding="latin1",
+                        data_path / "original" / original_filename,
+                        "rt",
+                        encoding="latin1",
                     ) as open_fp:
                         with open(
-                                data_path / new_filename, "wt", encoding="utf-8"
+                            data_path / new_filename, "wt", encoding="utf-8"
                         ) as write_fp:
                             for line in open_fp:
                                 line = line.rstrip()
@@ -813,10 +823,10 @@ class NLPTaskDataFetcher:
                 lc = "ru"
 
             data_file = (
-                    Path(flair.cache_root)
-                    / "datasets"
-                    / task.value
-                    / f"aij-wikiner-{lc}-wp3.train"
+                Path(flair.cache_root)
+                / "datasets"
+                / task.value
+                / f"aij-wikiner-{lc}-wp3.train"
             )
             if not data_file.is_file():
 
@@ -835,11 +845,11 @@ class NLPTaskDataFetcher:
                     "rb",
                 )
                 with bz_file as f, open(
-                        Path(flair.cache_root)
-                        / "datasets"
-                        / task.value
-                        / f"aij-wikiner-{lc}-wp3.train",
-                        "w",
+                    Path(flair.cache_root)
+                    / "datasets"
+                    / task.value
+                    / f"aij-wikiner-{lc}-wp3.train",
+                    "w",
                 ) as out:
                     for line in f:
                         line = line.decode("utf-8")
@@ -1300,6 +1310,41 @@ class NLPTaskDataFetcher:
                 Path("datasets") / task.value,
             )
 
+        if task.value.startswith("wassa"):
+
+            emotion = task.value[6:]
+
+            for split in ["train", "dev", "test"]:
+
+                data_file = (
+                    Path(flair.cache_root)
+                    / "datasets"
+                    / task.value
+                    / f"{emotion}-{split}.txt"
+                )
+
+                if not data_file.is_file():
+
+                    if split == "train":
+                        url = f"http://saifmohammad.com/WebDocs/EmoInt%20Train%20Data/{emotion}-ratings-0to1.train.txt"
+                    if split == "dev":
+                        url = f"http://saifmohammad.com/WebDocs/EmoInt%20Dev%20Data%20With%20Gold/{emotion}-ratings-0to1.dev.gold.txt"
+                    if split == "test":
+                        url = f"http://saifmohammad.com/WebDocs/EmoInt%20Test%20Gold%20Data/{emotion}-ratings-0to1.test.gold.txt"
+
+                    path = cached_path(url, Path("datasets") / task.value)
+
+                    with open(path, "r") as f:
+                        with open(data_file, "w") as out:
+                            next(f)
+                            for line in f:
+                                fields = line.split("\t")
+                                out.write(
+                                    f"__label__{fields[3].rstrip()} {fields[1]}\n"
+                                )
+
+                    os.remove(path)
+
         if task == NLPTask.UD_GERMAN_HDT:
             cached_path(
                 f"{ud_path}UD_German-HDT/dev/de_hdt-ud-dev.conllu",
@@ -1327,6 +1372,6 @@ class NLPTaskDataFetcher:
                 with open(new_train_file, "wt") as f_out:
                     for train_filename in train_filenames:
                         with open(
-                                data_path / "original" / train_filename, "rt"
+                            data_path / "original" / train_filename, "rt"
                         ) as f_in:
                             f_out.write(f_in.read())
